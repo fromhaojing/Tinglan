@@ -6,6 +6,17 @@ struct SettingsView: View {
     @State private var cacheSize: String = String(localized: "计算中…")
 
     var body: some View {
+        #if os(macOS)
+        NavigationStack {
+            settingsForm
+        }
+        .frame(width: 440, height: 480)
+        #else
+        settingsForm
+        #endif
+    }
+
+    private var settingsForm: some View {
         Form {
             Section("播放") {
                 Picker("音质", selection: $settings.audioQuality) {
@@ -17,9 +28,28 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Toggle("灰色歌曲解锁", isOn: $settings.enableUnblock)
-                Text("无版权 / 下架歌曲自动从第三方音源（酷我、酷狗等）匹配播放")
+                Text("无版权或下架歌曲将从已启用音源中匹配播放")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            if settings.enableUnblock {
+                Section {
+                    ForEach(AudioSourceID.allCases, id: \.self) { source in
+                        Toggle(source.displayName, isOn: Binding(
+                            get: { settings.enabledAudioSourceIDs.contains(source) },
+                            set: { isEnabled in
+                                if isEnabled {
+                                    settings.enabledAudioSourceIDs.insert(source)
+                                } else {
+                                    settings.enabledAudioSourceIDs.remove(source)
+                                }
+                            }
+                        ))
+                    }
+                } header: {
+                    Text("音源")
+                }
             }
 
             Section("外观") {
@@ -28,11 +58,26 @@ struct SettingsView: View {
                         Text(appearance.displayName).tag(appearance)
                     }
                 }
+                #if os(macOS)
+                // macOS only renders two now-playing layouts — 黑胶 and the
+                // regular page; the iOS 沉浸/简洁 options all fall back to the
+                // regular page here, so offering four was misleading (#105).
+                // Map any non-vinyl value onto 经典模式 so a stored default (e.g.
+                // 沉浸模式) still shows a valid selection.
+                Picker("播放页模式", selection: Binding(
+                    get: { settings.nowPlayingMode == .vinyl ? .vinyl : .classic },
+                    set: { settings.nowPlayingMode = $0 }
+                )) {
+                    Text(NowPlayingMode.vinyl.displayName).tag(NowPlayingMode.vinyl)
+                    Text(NowPlayingMode.classic.displayName).tag(NowPlayingMode.classic)
+                }
+                #else
                 Picker("播放页模式", selection: $settings.nowPlayingMode) {
                     ForEach(NowPlayingMode.allCases) { mode in
                         Text(mode.displayName).tag(mode)
                     }
                 }
+                #endif
                 Toggle("显示歌词翻译", isOn: $settings.showLyricsTranslation)
                 Toggle("逐字歌词（卡拉OK）", isOn: $settings.verbatimLyrics)
                 Picker("日文歌词读音", selection: $settings.lyricsAnnotation) {
@@ -60,6 +105,16 @@ struct SettingsView: View {
                     clearCache()
                 }
             }
+
+            #if os(macOS)
+            Section("通用") {
+                NavigationLink {
+                    ShortcutSettingsView()
+                } label: {
+                    Label("快捷键", systemImage: "keyboard")
+                }
+            }
+            #endif
 
             Section("账号") {
                 if let profile = account.profile {
@@ -98,9 +153,6 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        #if os(macOS)
-        .frame(width: 440, height: 480)
-        #endif
         .task { updateCacheSize() }
     }
 

@@ -8,6 +8,7 @@ public struct TinglanApp: App {
     @StateObject private var account = AccountStore.shared
     @StateObject private var settings = SettingsManager.shared
     @StateObject private var toasts = ToastCenter.shared
+    @StateObject private var shortcuts = ShortcutManager.shared
 
     public init() {}
 
@@ -40,16 +41,20 @@ public struct TinglanApp: App {
                 .disabled(!player.hasCurrentTrack)
 
                 Button("下一首") { player.next() }
-                    .keyboardShortcut(.rightArrow, modifiers: .command)
+                    .keyboardShortcut(shortcuts.shortcut(for: .nextTrack, isGlobal: false).keyboardShortcut)
                 Button("上一首") { player.previous() }
-                    .keyboardShortcut(.leftArrow, modifiers: .command)
+                    .keyboardShortcut(shortcuts.shortcut(for: .previousTrack, isGlobal: false).keyboardShortcut)
 
                 Divider()
 
                 Button("随机播放") { player.toggleShuffle() }
-                    .keyboardShortcut("s", modifiers: [.command, .shift])
+                    .keyboardShortcut(shortcuts.shortcut(for: .cycleQueueOrder, isGlobal: false).keyboardShortcut)
                 Button("循环模式") { player.cycleRepeatMode() }
-                    .keyboardShortcut("r", modifiers: [.command, .shift])
+                    .keyboardShortcut(shortcuts.shortcut(for: .cycleRepeatMode, isGlobal: false).keyboardShortcut)
+
+                Divider()
+
+                SleepTimerMenu(player: player)
 
                 Divider()
 
@@ -58,18 +63,18 @@ public struct TinglanApp: App {
                         Task { await account.toggleLike(trackID: track.id) }
                     }
                 }
-                .keyboardShortcut("l", modifiers: [.command, .shift])
+                .keyboardShortcut(shortcuts.shortcut(for: .toggleLike, isGlobal: false).keyboardShortcut)
                 .disabled(!player.hasCurrentTrack)
 
                 Button("歌词") {
                     player.activePanel = player.activePanel == .lyrics ? nil : .lyrics
                 }
-                .keyboardShortcut("l", modifiers: .command)
+                .keyboardShortcut(shortcuts.shortcut(for: .toggleLyrics, isGlobal: false).keyboardShortcut)
 
                 Button("播放队列") {
                     player.activePanel = player.activePanel == .queue ? nil : .queue
                 }
-                .keyboardShortcut("u", modifiers: .command)
+                .keyboardShortcut(shortcuts.shortcut(for: .toggleQueue, isGlobal: false).keyboardShortcut)
             }
         }
 
@@ -90,32 +95,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Installed by the SwiftUI main scene. Calling it recreates the scene
     /// when its NSWindow was released after the user closed the last window.
     var openMainWindow: (() -> Void)?
+    /// The single main window, captured by `MainWindowConfigurator`. Its close
+    /// interceptor hides (orders out) the window instead of destroying the
+    /// single-instance `Window` scene, so we can always bring it back here.
+    weak var mainWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Self.shared = self
-        // Space toggles play/pause unless a text field is being edited.
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            let noModifiers = event.modifierFlags
-                .intersection([.command, .option, .control, .shift]).isEmpty
-            let editingText = NSApp.keyWindow?.firstResponder is NSText
-                || NSApp.keyWindow?.firstResponder is NSTextView
-
-            // Space: play/pause (unless typing)
-            if event.keyCode == 49, noModifiers, !editingText {
-                Task { @MainActor in
-                    PlayerService.shared.togglePlayPause()
+            let handled = MainActor.assumeIsolated {
+                // Let the recorder receive even keys that already have a binding.
+                if ShortcutManager.shared.isRecordingShortcut {
+                    if let recorder = event.window?.firstResponder as? ShortcutRecorderView.RecorderNSView {
+                        recorder.keyDown(with: event)
+                        return true
+                    }
+                    return false
                 }
-                return nil
-            }
-            // Esc: close the immersive now-playing page
-            if event.keyCode == 53, noModifiers, MainActor.assumeIsolated({ PlayerService.shared.showNowPlaying }) {
-                Task { @MainActor in
+                if event.keyCode == 53,
+                   event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
+                   PlayerService.shared.showNowPlaying {
                     PlayerService.shared.showNowPlaying = false
+                    return true
                 }
-                return nil
+                return ShortcutManager.shared.handleKeyEvent(event)
             }
-            return event
+            return handled ? nil : event
         }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        MainActor.assumeIsolated { GlobalHotKeyManager.shared.shutdown() }
     }
 
     @MainActor
@@ -128,20 +139,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows _: Bool) -> Bool {
-        // `hasVisibleWindows` includes helper windows such as desktop lyrics.
-        // If the WindowGroup has already released its NSWindow, use the
-        // SwiftUI scene action below to create it again.
-        if let mainWindow = sender.windows.first(where: {
+        // `hasVisibleWindows` is unreliable here: helper windows such as the
+        // desktop-lyrics overlay make it `true` even when the main window is
+        // gone, so decide based on the main window itself.
+        //
+        // `MainWindowConfigurator` keeps the main window alive on close
+        // (orders it out rather than destroying the scene), so it is normally
+        // still around — just hidden and/or miniaturised, and possibly behind
+        // other windows. Restore and front it. Only if it truly no longer
+        // exists do we ask SwiftUI to recreate the scene.
+        let target = mainWindow ?? sender.windows.first {
             $0.styleMask.contains(.titled) && $0.canBecomeMain
-        }), !mainWindow.isVisible {
-            mainWindow.makeKeyAndOrderFront(nil)
-        } else if !sender.windows.contains(where: {
-            $0.isVisible && $0.styleMask.contains(.titled) && $0.canBecomeMain
-        }) {
+        }
+        if let window = target {
+            if window.isMiniaturized { window.deminiaturize(nil) }
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        } else {
             openMainWindow?()
         }
-        // The reopen request is fully handled above. Letting AppKit handle it
-        // again can enqueue another SwiftUI scene request.
+        // Fully handled above; returning `false` prevents AppKit from also
+        // enqueuing another SwiftUI scene request (which re-created #58's
+        // duplicate window).
         return false
     }
 }

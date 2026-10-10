@@ -40,6 +40,13 @@
 "播放队列是空的" = "The queue is empty";
 "播放一些音乐吧" = "Play some music";
 "%lld 首" = "%lld songs";
+"睡眠定时" = "Sleep Timer";
+"睡眠定时（剩余 %@）" = "Sleep Timer (%@ remaining)";
+"睡眠定时（本曲结束）" = "Sleep Timer (End of Song)";
+"当前歌曲结束时停止" = "Stop at End of Current Song";
+"将在当前歌曲结束时停止" = "Stops at the end of the current song";
+"剩余 %@" = "%@ remaining";
+"取消睡眠定时" = "Cancel Sleep Timer";
 
 /* Home */
 "推荐歌单" = "Recommended Playlists";
@@ -149,6 +156,8 @@
 "多听几首歌培养口味，每天 6:00 更新" = "Listen to more songs to build your taste — refreshes daily at 6:00";
 "根据你的音乐口味 · 每天 6:00 更新" = "Based on your taste · Refreshes daily at 6:00";
 "登录后才能查看每日推荐" = "Sign in to see daily recommendations";
+"减少推荐" = "Recommend less";
+"已减少推荐" = "Recommendation reduced";
 "登录后查看你喜欢的音乐" = "Sign in to see your liked songs";
 
 /* Search */
@@ -199,7 +208,7 @@
 "高解析" = "Hi-Res";
 "无损与 Hi-Res 需要黑胶 VIP，未开通时自动回落到可用音质" = "Lossless and Hi-Res require VIP; falls back automatically otherwise";
 "灰色歌曲解锁" = "Unblock Gray Tracks";
-"无版权 / 下架歌曲自动从第三方音源（酷我、酷狗等）匹配播放" = "Unavailable tracks are matched from third-party sources (Kuwo, Kugou, etc.)";
+"无版权或下架歌曲将从已启用音源中匹配播放" = "Unavailable tracks are matched from enabled sources";
 "外观" = "Appearance";
 "主题" = "Theme";
 "跟随系统" = "System";
@@ -291,3 +300,23 @@
 "不循环" = "Off";
 "列表循环" = "Repeat All";
 "单曲循环" = "Repeat One";
+
+"通用" = "General";
+"快捷键" = "Keyboard Shortcuts";
+"快捷键类型" = "Shortcut Type";
+"应用快捷键" = "In-App Shortcuts";
+"全局快捷键" = "Global Shortcuts";
+"点击按键进行录制，按下 Esc 键可清除快捷键。" = "Click a shortcut to record it. Press Esc to clear the binding.";
+"重置为默认" = "Reset to Defaults";
+"请按下按键..." = "Press a key…";
+"无法设置快捷键" = "Unable to Set Shortcut";
+"此快捷键不可用或已被占用，请选择其他按键。" = "This shortcut is unavailable or already in use. Choose another key.";
+"切换循环模式" = "Cycle Repeat Mode";
+"喜欢 / 取消喜欢" = "Like / Unlike";
+"切换歌词面板" = "Toggle Lyrics Panel";
+"切换播放队列" = "Toggle Playback Queue";
+"关闭沉浸播放页" = "Close Now Playing";
+"增加音量" = "Increase Volume";
+"减少音量" = "Decrease Volume";
+"好" = "OK";
+"无" = "None";

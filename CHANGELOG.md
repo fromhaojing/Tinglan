@@ -6,6 +6,25 @@
 section the English bullets come first, followed by their Simplified Chinese
 counterparts. 段落格式：`## <版本号> - <日期>`，条目必须写成单行。
 
+## 1.3.0 - 2026-10-10
+
+### Added / 新增
+
+- Added sleep timers, reduce-recommendation actions, per-source gray-track controls, and customizable macOS shortcuts with opt-in global hotkeys
+- 新增睡眠定时、减少推荐、灰色歌曲音源独立开关，以及 macOS 自定义快捷键和默认关闭的全局快捷键
+
+### Fixed / 修复
+
+- Fixed main-window restoration from the Dock, home card sizing, macOS playback-mode choices, iPad settings/search access, and the iOS launch-screen declaration
+- 修复 Dock 唤出主窗口、首页卡片宽度、macOS 播放模式选项、iPad 设置与搜索入口，以及 iOS 启动屏声明
+- Validate third-party audio title, artist and duration; retry unreachable NetEase CDN hosts once and isolate obsolete playback callbacks after track changes
+- 校验第三方音源的歌名、歌手与时长；网易云 CDN 主机不可达时重试备用主机，并隔离切歌后过期的播放回调
+
+### Improved / 改进
+
+- iOS update IPAs are accessible in Files and can be shared to signing tools; improve landscape player sizing and tap-cover behavior
+- iOS 更新包可在文件 App 中找到并分享至签名工具；改进横屏播放页尺寸与点击封面收起歌词的行为
+
 ## 1.2.1 - 2026-09-01
 
 ### Fixed / 修复

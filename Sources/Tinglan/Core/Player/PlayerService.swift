@@ -125,6 +125,7 @@ final class PlayerService: ObservableObject {
     @Published private(set) var isTrial = false
     let clock = PlaybackClock()
     let lyricsCursor = LyricsCursor()
+    let sleepTimer = SleepTimer()
     /// Passthrough to the clock so existing `progress` reads/writes keep working.
     var progress: TimeInterval {
         get { clock.progress }
@@ -175,13 +176,25 @@ final class PlayerService: ObservableObject {
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
     private var statusObservation: NSKeyValueObservation?
+    private var itemStatusObservation: NSKeyValueObservation?
     private var resolveGeneration = 0
     private var consecutiveFailures = 0
+    private var attemptedUnblockSources: Set<AudioSourceID> = []
+    private var currentUnblockSourceID: AudioSourceID?
+    private var didRetryNeteaseCDN = false
     private var scrobbled = false
     private var startScrobbled = false
 
+    private enum ResolvedURLLoadResult {
+        case loaded
+        case superseded
+    }
+
     private init() {
         engine.actionAtItemEnd = .pause
+        sleepTimer.onDeadlineReached = { [weak self] in
+            self?.pause()
+        }
         volume = UserDefaults.standard.object(forKey: "player.volume") as? Float ?? 0.8
         engine.volume = volume
         repeatMode = UserDefaults.standard.string(forKey: "player.repeat")
@@ -339,6 +352,7 @@ final class PlayerService: ObservableObject {
         } else {
             engine.play()
             isPlaying = true
+            scrobbleStartIfNeeded()
         }
         NowPlayingManager.shared.updateElapsed(progress, rate: isPlaying ? 1 : 0)
     }
@@ -540,6 +554,17 @@ final class PlayerService: ObservableObject {
 
     private func handleItemEnded() {
         scrobbleIfNeeded(completed: true)
+
+        if sleepTimer.consumeEndOfCurrentTrack() {
+            progress = duration
+            updateLyricsCursor(at: duration)
+            pause()
+            engine.replaceCurrentItem(with: nil)
+            return
+        }
+
+        guard isPlaying else { return }
+
         if repeatMode == .one, !isFMMode {
             scrobbled = false
             seek(to: 0)
@@ -559,6 +584,11 @@ final class PlayerService: ObservableObject {
         duration = track.duration
         servedQuality = nil
         unblockSource = nil
+        currentUnblockSourceID = nil
+        didRetryNeteaseCDN = false
+        attemptedUnblockSources.removeAll()
+        itemStatusObservation?.invalidate()
+        itemStatusObservation = nil
         isTrial = false
         lyrics = nil
         scrobbled = false
@@ -597,46 +627,100 @@ final class PlayerService: ObservableObject {
         }
 
         // NetEase refused — try third-party sources (UnblockNeteaseMusic-style).
-        if resolvedURL == nil || data?.freeTrialInfo != nil, SettingsManager.shared.enableUnblock {
-            if let unblocked = await UnblockService.resolve(track) {
-                guard generation == resolveGeneration else { return }
-                resolvedURL = unblocked.url
-                unblockSource = unblocked.source
-                data = nil
-                ToastCenter.shared.show(String(localized: "已使用第三方音源：\(unblocked.source)"))
-            }
+        if resolvedURL == nil || data?.freeTrialInfo != nil,
+           SettingsManager.shared.canResolveUnblockedTracks {
+            if await resolveAndLoadUnblocked(track, generation: generation) { return }
         }
         guard generation == resolveGeneration else { return }
 
         guard let url = resolvedURL else {
-            consecutiveFailures += 1
-            let reason = track.playability(privilege: nil,
-                                           isLoggedIn: AccountStore.shared.isLoggedIn,
-                                           vipType: AccountStore.shared.vipType).reason
-            ToastCenter.shared.show(String(localized: "《\(track.name)》无法播放\(reason.map { "：\($0)" } ?? "")"))
-            if consecutiveFailures < 5 {
-                advanceToNext(userInitiated: false)
-            } else {
-                isPlaying = false
-            }
+            handleUnplayable(track)
             return
         }
 
-        consecutiveFailures = 0
         servedQuality = data?.level
         if data?.freeTrialInfo != nil {
             isTrial = true
             ToastCenter.shared.show(String(localized: "VIP 歌曲，当前为试听片段"))
         }
+        _ = await loadResolvedURL(track, url: url, durationMS: data?.time, generation: generation)
+    }
 
+    private func resolveAndLoadUnblocked(
+        _ track: Track,
+        generation: Int,
+        requiresActivePlayback: Bool = false
+    ) async -> Bool {
+        let enabledSources = SettingsManager.shared.enabledAudioSourceIDs
+        guard !enabledSources.isEmpty else { return false }
+
+        guard generation == resolveGeneration,
+              !requiresActivePlayback || isPlaying
+        else { return false }
+
+        let resolution = await UnblockService.resolve(
+            track,
+            enabledSources: enabledSources,
+            excluding: attemptedUnblockSources
+        )
+        guard generation == resolveGeneration,
+              !requiresActivePlayback || isPlaying
+        else { return false }
+        attemptedUnblockSources.formUnion(resolution.attemptedSources)
+        guard let unblocked = resolution.source else { return false }
+
+        currentUnblockSourceID = unblocked.id
+        unblockSource = unblocked.displayName
+        servedQuality = nil
+        isTrial = false
+
+        let loadResult = await loadResolvedURL(
+            track,
+            url: unblocked.url,
+            durationMS: nil,
+            generation: generation
+        )
+        guard case .loaded = loadResult else { return false }
+
+        ToastCenter.shared.show(String(localized: "已使用第三方音源：\(unblocked.displayName)"))
+        return true
+    }
+
+    private func handleUnplayable(_ track: Track) {
+        consecutiveFailures += 1
+        let reason = track.playability(privilege: nil,
+                                       isLoggedIn: AccountStore.shared.isLoggedIn,
+                                       vipType: AccountStore.shared.vipType).reason
+        ToastCenter.shared.show(String(localized: "《\(track.name)》无法播放\(reason.map { "：\($0)" } ?? "")"))
+        guard isPlaying else {
+            engine.replaceCurrentItem(with: nil)
+            return
+        }
+        if consecutiveFailures < 5 {
+            advanceToNext(userInitiated: false)
+        } else {
+            pause()
+            engine.replaceCurrentItem(with: nil)
+        }
+    }
+
+    private func loadResolvedURL(
+        _ track: Track,
+        url: URL,
+        durationMS: Int?,
+        generation: Int,
+        resumeAt: TimeInterval = 0
+    ) async -> ResolvedURLLoadResult {
+        guard generation == resolveGeneration, currentTrack?.id == track.id else { return .superseded }
+        let remoteURL = currentUnblockSourceID == nil ? NeteaseCDNHost.preferred(for: url) : url
         // Resolve the asset's audio track before the item goes live: an audio mix
         // attached after playback starts is silently ignored, so the spectrum tap
         // has to be spliced in here or not at all. Sources that refuse byte-range
         // requests never resolve a track — those play untapped and the UI falls
         // back to its decorative animation.
-        let asset = AVURLAsset(url: url)
+        let asset = AVURLAsset(url: remoteURL)
         let assetTrack = await loadAudioTrack(from: asset, timeout: 2)
-        guard generation == resolveGeneration else { return }
+        guard generation == resolveGeneration else { return .superseded }
 
         let item = AVPlayerItem(asset: asset)
         if let assetTrack, let mix = AudioSpectrum.shared.makeAudioMix(for: assetTrack) {
@@ -645,30 +729,132 @@ final class PlayerService: ObservableObject {
             AudioSpectrum.shared.markUntappable()
         }
 
+        itemStatusObservation?.invalidate()
+        itemStatusObservation = nil
+        let sourceID = currentUnblockSourceID
+        itemStatusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
+            let status = item.status
+            let error = item.error
+            Task { @MainActor [weak item] in
+                guard let self, let item,
+                      generation == self.resolveGeneration,
+                      self.engine.currentItem === item else { return }
+                switch status {
+                case .readyToPlay:
+                    self.consecutiveFailures = 0
+                    if sourceID == nil { NeteaseCDNHost.markReachable(remoteURL) }
+                case .failed:
+                    if let sourceID {
+                        self.handleUnblockItemFailure(track: track, generation: generation, sourceID: sourceID)
+                    } else {
+                        self.handleNeteaseItemFailure(track: track, generation: generation,
+                                                     url: remoteURL, durationMS: durationMS, error: error)
+                    }
+                default:
+                    break
+                }
+            }
+        }
+
         if let old = endObserver {
             NotificationCenter.default.removeObserver(old)
         }
         endObserver = NotificationCenter.default.addObserver(
             forName: AVPlayerItem.didPlayToEndTimeNotification, object: item, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
-                self?.handleItemEnded()
+            Task { @MainActor [weak item] in
+                guard let self, let item,
+                      generation == self.resolveGeneration,
+                      self.engine.currentItem === item else { return }
+                self.handleItemEnded()
             }
         }
         engine.replaceCurrentItem(with: item)
-        engine.play()
-        isPlaying = true
-
-        if !startScrobbled {
-            startScrobbled = true
-            let tid = track.id
-            let sid = source.sourceID
-            Task.detached { await NeteaseAPI.scrobbleStart(trackID: tid, sourceID: sid) }
+        if resumeAt > 0 {
+            let length = durationMS.map { TimeInterval($0) / 1000 } ?? duration
+            let position = length > 0.1 ? min(resumeAt, length - 0.1) : resumeAt
+            // Seek the specific recovery item: a concurrent track change must
+            // never seek the new song through the shared AVPlayer.
+            _ = await item.seek(to: CMTime(seconds: position, preferredTimescale: 600),
+                                toleranceBefore: .zero, toleranceAfter: .zero)
+            guard generation == resolveGeneration, engine.currentItem === item else { return .superseded }
+        }
+        if isPlaying {
+            engine.play()
+            scrobbleStartIfNeeded()
         }
 
-        if let time = data?.time, time > 0 {
-            duration = TimeInterval(time) / 1000
+        if let durationMS, durationMS > 0 {
+            duration = TimeInterval(durationMS) / 1000
             NowPlayingManager.shared.updateMetadata(for: track, duration: duration)
+            NowPlayingManager.shared.updateElapsed(progress, rate: isPlaying ? 1 : 0)
+        }
+        return .loaded
+    }
+
+    private func handleNeteaseItemFailure(
+        track: Track, generation: Int, url: URL, durationMS: Int?, error: Error?
+    ) {
+        guard generation == resolveGeneration, currentTrack?.id == track.id,
+              currentUnblockSourceID == nil else { return }
+        itemStatusObservation?.invalidate()
+        itemStatusObservation = nil
+        engine.replaceCurrentItem(with: nil)
+        let resumeAt = progress > 1 ? progress : 0
+        let twin = !didRetryNeteaseCDN
+            ? error.flatMap { NeteaseCDNHost.failover(from: url, after: $0) } : nil
+        guard isPlaying else { return }
+        AudioSpectrum.shared.beginPreparing()
+        if let twin {
+            didRetryNeteaseCDN = true
+            Task {
+                _ = await loadResolvedURL(track, url: twin, durationMS: durationMS,
+                                          generation: generation, resumeAt: resumeAt)
+            }
+        } else {
+            Task {
+                let loaded = SettingsManager.shared.canResolveUnblockedTracks
+                    ? await resolveAndLoadUnblocked(track, generation: generation, requiresActivePlayback: true)
+                    : false
+                guard generation == resolveGeneration, isPlaying, !loaded else { return }
+                handleUnplayable(track)
+            }
+        }
+    }
+
+    private func handleUnblockItemFailure(
+        track: Track,
+        generation: Int,
+        sourceID: AudioSourceID
+    ) {
+        guard generation == resolveGeneration,
+              currentTrack?.id == track.id,
+              currentUnblockSourceID == sourceID
+        else { return }
+
+        itemStatusObservation?.invalidate()
+        itemStatusObservation = nil
+        currentUnblockSourceID = nil
+        unblockSource = nil
+        engine.replaceCurrentItem(with: nil)
+        AudioSpectrum.shared.beginPreparing()
+
+        guard isPlaying else {
+            return
+        }
+
+        Task {
+            let loaded = await resolveAndLoadUnblocked(
+                track,
+                generation: generation,
+                requiresActivePlayback: true
+            )
+            guard isPlaying else { return }
+            guard loaded else {
+                guard generation == resolveGeneration else { return }
+                handleUnplayable(track)
+                return
+            }
         }
     }
 
@@ -697,6 +883,16 @@ final class PlayerService: ObservableObject {
     }
 
     // MARK: - Scrobble
+
+    private func scrobbleStartIfNeeded() {
+        guard let track = currentTrack, !startScrobbled else { return }
+        startScrobbled = true
+        let trackID = track.id
+        let sourceID = source.sourceID
+        Task.detached {
+            await NeteaseAPI.scrobbleStart(trackID: trackID, sourceID: sourceID)
+        }
+    }
 
     private func scrobbleIfNeeded(completed: Bool) {
         guard let track = currentTrack, !scrobbled, progress > 1 else { return }
